@@ -2,6 +2,9 @@ import { useState, useEffect } from 'react';
 
 const SHEET_ID = '1SjQEi48R6AmSVlov5JJ1xkobxEcxPMEe332mkU-3NiA';
 
+// 标准化函数：去掉前后空格，全部转为小写，解决大小写和空格导致的匹配失败
+const normalize = (str) => String(str || '').trim().toLowerCase();
+
 const parseCSV = (csvText) => {
   const lines = csvText.split('\n').map(line => {
     const row = [];
@@ -45,7 +48,8 @@ const parseNumber = (str) => {
 
 const parseDate = (str) => {
   if (!str) return null;
-  const parts = str.split(/[-/]/);
+  // 兼容 2026/11/15 和 2026-07-16 两种格式
+  const parts = str.replace(/\//g, '-').split('-');
   if (parts.length === 3) {
     return new Date(parts[0], parts[1] - 1, parts[2]).getTime();
   }
@@ -71,19 +75,21 @@ export default function Home() {
       const rateData = parseCSV(rateRes);
       const dailyData = parseCSV(dailyRes);
 
+      // 通道成本：全部标准化
       const costs = costData.map(row => ({
-        channel: row['通道名称'],
-        wallet: row['钱包/支付方式'].toLowerCase(),
+        channel: normalize(row['通道名称']),
+        wallet: normalize(row['钱包/支付方式']),
         collectRate: parseRate(row['通道代收成本率(%)']),
         collectFixed: parseNumber(row['通道代收固定成本(USD/笔)']),
         payRate: parseRate(row['通道代付成本率(%)']),
         payFixed: parseNumber(row['通道代付固定成本(USD/笔)'])
       }));
 
+      // 商户费率：全部标准化
       const rates = rateData.map(row => ({
-        merchant: row['商户名称'],
-        wallet: row['钱包/支付方式'].toLowerCase(),
-        channel: row['通道名称'],
+        merchant: normalize(row['商户名称']),
+        wallet: normalize(row['钱包/支付方式']),
+        channel: normalize(row['通道名称']),
         collectRate: parseRate(row['商户代收费率(%)']),
         collectFixed: parseNumber(row['商户代收固定费(USD/笔)']),
         payRate: parseRate(row['商户代付费率(%)']),
@@ -96,12 +102,12 @@ export default function Home() {
       let totalPayProfit = 0;
       const calculatedDetails = dailyData.map(row => {
         const date = row['日期'];
-        const merchant = row['商户名称'];
-        const wallet = row['钱包/支付方式'].toLowerCase();
-        const cChannel = row['代收通道名称'];
+        const merchant = normalize(row['商户名称']);
+        const wallet = normalize(row['钱包/支付方式']);
+        const cChannel = normalize(row['代收通道名称']);
         const cAmount = parseNumber(row['代收金额(USD)']);
         const cCount = parseNumber(row['代收笔数']);
-        const pChannel = row['代付通道名称'];
+        const pChannel = normalize(row['代付通道名称']);
         const pAmount = parseNumber(row['代付金额(USD)']);
         const pCount = parseNumber(row['代付笔数']);
         
@@ -110,32 +116,42 @@ export default function Home() {
         let warnings = [];
         const timestamp = parseDate(date);
 
+        // 算代收
         if (cAmount > 0 || cCount > 0) {
           const mRate = rates.find(r => r.merchant === merchant && r.wallet === wallet && r.channel === cChannel && (!r.startDate || r.startDate <= timestamp) && (!r.endDate || r.endDate >= timestamp));
           const cCost = costs.find(c => c.channel === cChannel && c.wallet === wallet);
+
+          if (!mRate) warnings.push('缺商户代收费率');
+          if (!cCost) warnings.push('缺通道代收成本');
 
           if (mRate && mRate.collectRate !== null && cCost && cCost.collectRate !== null) {
             const income = (cAmount * mRate.collectRate / 100) + (cCount * mRate.collectFixed);
             const cost = (cAmount * cCost.collectRate / 100) + (cCount * cCost.collectFixed);
             cProfit = income - cost;
-          } else {
-            warnings.push('代收费率或成本缺失');
+          } else if (warnings.length === 0) {
+            warnings.push('代收配置不支持');
           }
         }
 
+        // 算代付
         if (pAmount > 0 || pCount > 0) {
           if (!pChannel) {
-            warnings.push('缺代付通道');
+            warnings.push('缺代付通道名称');
           } else {
             const mRate = rates.find(r => r.merchant === merchant && r.wallet === wallet && r.channel === pChannel && (!r.startDate || r.startDate <= timestamp) && (!r.endDate || r.endDate >= timestamp));
             const pCost = costs.find(c => c.channel === pChannel && c.wallet === wallet);
+
+            if (!mRate) warnings.push('缺商户代付费率');
+            if (!pCost) warnings.push('缺通道代付成本');
 
             if (mRate && mRate.payRate !== null && pCost && pCost.payRate !== null) {
               const income = (pAmount * mRate.payRate / 100) + (pCount * mRate.payFixed);
               const cost = (pAmount * pCost.payRate / 100) + (pCount * pCost.payFixed);
               pProfit = income - cost;
+            } else if (!mRate || !pCost) {
+               // 如果缺配置，不覆盖前面的warnings
             } else {
-              warnings.push('代付费率或成本缺失');
+               warnings.push('代付配置不支持');
             }
           }
         }
@@ -144,11 +160,11 @@ export default function Home() {
         totalPayProfit += pProfit;
 
         return {
-          date, merchant, wallet, cChannel, cAmount, cCount, pChannel, pAmount, pCount,
+          date, merchant: row['商户名称'], wallet: row['钱包/支付方式'], cChannel: row['代收通道名称'], cAmount, cCount, pChannel: row['代付通道名称'], pAmount, pCount,
           cProfit: cProfit.toFixed(2),
           pProfit: pProfit.toFixed(2),
           totalRowProfit: (cProfit + pProfit).toFixed(2),
-          warnings: warnings.join(', ')
+          warnings: Array.from(new Set(warnings)).join(', ')
         };
       });
 
